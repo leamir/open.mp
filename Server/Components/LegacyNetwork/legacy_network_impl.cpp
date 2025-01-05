@@ -313,7 +313,7 @@ enum LegacyClientVersion
 	LegacyClientVersion_03DL = 4062
 };
 
-IPlayer* RakNetLegacyNetwork::OnPeerConnect(RakNet::RPCParameters* rpcParams, bool isNPC, StringView serial, uint32_t version, StringView versionName, uint32_t challenge, StringView name, bool isUsingOmp, bool isUsingOfficialClient)
+IPlayer* RakNetLegacyNetwork::OnPeerConnect(RakNet::RPCParameters* rpcParams, bool isNPC, StringView serial, uint32_t version, StringView versionName, uint32_t challenge, StringView name, bool isUsingOfficialClient)
 {
 	const RakNet::PlayerID rid = rpcParams->sender;
 
@@ -344,7 +344,6 @@ IPlayer* RakNetLegacyNetwork::OnPeerConnect(RakNet::RPCParameters* rpcParams, bo
 		params.bot = isNPC;
 		params.serial = serial;
 		params.isUsingOfficialClient = isUsingOfficialClient;
-		params.isUsingOmp = isUsingOmp;
 		newConnectionResult = core->getPlayers().requestPlayer(netData, params);
 	}
 	else
@@ -426,13 +425,7 @@ void RakNetLegacyNetwork::OnPlayerConnect(RakNet::RPCParameters* rpcParams, void
 		return;
 	}
 
-	bool isUsingOmp = SAMPRakNet::IsPlayerUsingOmp(rpcParams->sender);
-	if (isUsingOmp)
-	{
-		SAMPRakNet::SetPlayerOmpVersion(rpcParams->sender, playerConnectRPC.OmpVersion);
-	}
-
-	IPlayer* newPeer = network->OnPeerConnect(rpcParams, false, serial, playerConnectRPC.VersionNumber, playerConnectRPC.VersionString, playerConnectRPC.ChallengeResponse, playerConnectRPC.Name, isUsingOmp, playerConnectRPC.IsUsingOfficialClient);
+	IPlayer* newPeer = network->OnPeerConnect(rpcParams, false, serial, playerConnectRPC.VersionNumber, playerConnectRPC.VersionString, playerConnectRPC.ChallengeResponse, playerConnectRPC.Name, playerConnectRPC.IsUsingOfficialClient);
 	if (!newPeer)
 	{
 		network->rakNetServer.Kick(rpcParams->sender);
@@ -481,7 +474,7 @@ void RakNetLegacyNetwork::OnNPCConnect(RakNet::RPCParameters* rpcParams, void* e
 		NetCode::RPC::NPCConnect NPCConnectRPC;
 		if (NPCConnectRPC.read(bs))
 		{
-			IPlayer* newPeer = network->OnPeerConnect(rpcParams, true, "", NPCConnectRPC.VersionNumber, "npc", NPCConnectRPC.ChallengeResponse, NPCConnectRPC.Name, false);
+			IPlayer* newPeer = network->OnPeerConnect(rpcParams, true, "", NPCConnectRPC.VersionNumber, "npc", NPCConnectRPC.ChallengeResponse, NPCConnectRPC.Name);
 			if (newPeer)
 			{
 				if (!network->inEventDispatcher.stopAtFalse(
