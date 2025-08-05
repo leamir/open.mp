@@ -15,16 +15,19 @@
 #include <Server/Components/Vehicles/vehicle_seats.hpp>
 
 NPC::NPC(NPCComponent* component, IPlayer* playerPtr)
-	: skin_(0)
+	: footSyncSkipUpdate_(0)
+	, aimSyncSkipUpdate_(0)
+	, skin_(0)
 	, dead_(false)
 	, keys_(0)
 	, upAndDown_(0)
 	, leftAndRight_(0)
+	, health_(100.0f)
+	, armour_(0.0f)
 	, meleeAttacking_(false)
 	, meleeAttackDelay_(0)
 	, meleeSecondaryAttack_(false)
 	, moveType_(NPCMoveType_None)
-	, estimatedArrivalTimeMS_(0)
 	, moveSpeed_(0.0f)
 	, targetPosition_({ 0.0f, 0.0f, 0.0f })
 	, velocity_({ 0.0f, 0.0f, 0.0f })
@@ -49,10 +52,12 @@ NPC::NPC(NPCComponent* component, IPlayer* playerPtr)
 	, hitType_(PlayerBulletHitType_None)
 	, lastDamager_(nullptr)
 	, lastDamagerWeapon_(PlayerWeapon_End)
+	, vehicle_(nullptr)
 	, vehicleToEnter_(nullptr)
 	, vehicleSeatToEnter_(SEAT_NONE)
 	, enteringVehicle_(false)
 	, jackingVehicle_(false)
+	, killPlayerFromVehicleNextTick_(false)
 {
 	// Fill weapon accuracy with 1.0f, let server devs change it with the desired values
 	weaponAccuracy.fill(1.0f);
@@ -64,7 +69,7 @@ NPC::NPC(NPCComponent* component, IPlayer* playerPtr)
 
 	// Initial entity values
 	Vector3 initialPosition = position_ = { 0.0f, 0.0f, 3.5f };
-	GTAQuat initialRotation = { 0.960891485f, 0.0f, 0.0f, 0.276925147f };
+	GTAQuat initialRotation = rotation_ = { 0.960891485f, 0.0f, 0.0f, 0.276925147f };
 
 	// Initial values for foot sync values
 	footSync_.LeftRight = 0;
@@ -89,12 +94,14 @@ Vector3 NPC::getPosition() const
 	return position_;
 }
 
-void NPC::setPosition(Vector3 pos)
+void NPC::setPosition(const Vector3& pos, bool immediateUpdate)
 {
 	position_ = pos;
 
-	// Let it update for all players and internally in open.mp
-	sendFootSync();
+	if (immediateUpdate)
+	{
+		sendFootSync();
+	}
 
 	if (moving_)
 	{
@@ -107,12 +114,14 @@ GTAQuat NPC::getRotation() const
 	return player_->getRotation();
 }
 
-void NPC::setRotation(GTAQuat rot)
+void NPC::setRotation(const GTAQuat& rot, bool immediateUpdate)
 {
-	footSync_.Rotation = rot;
+	rotation_ = rot;
 
-	// Let it update for all players and internally in open.mp
-	sendFootSync();
+	if (immediateUpdate)
+	{
+		sendFootSync();
+	}
 
 	if (moving_)
 	{
@@ -165,6 +174,16 @@ bool NPC::move(Vector3 pos, NPCMoveType moveType, float moveSpeed)
 		return false;
 	}
 
+	if (moveType == NPCMoveType_Auto && player_->getState() == PlayerState_Driver)
+	{
+		moveType_ = NPCMoveType_Drive;
+	}
+
+	if (moveType != NPCMoveType_Auto && moveType != NPCMoveType_Walk && moveType != NPCMoveType_Jog && moveType != NPCMoveType_Sprint && moveType != NPCMoveType_Drive)
+	{
+		return false;
+	}
+
 	if (moveType == NPCMoveType_Sprint && aiming_)
 	{
 		stopAim();
@@ -174,54 +193,75 @@ bool NPC::move(Vector3 pos, NPCMoveType moveType, float moveSpeed)
 	auto position = getPosition();
 	float distance = glm::distance(position, pos);
 
+	// Reset player keys so there's no conflict when we need to use one and not the other for an already moving NPC
+	removeKey(Key::SPRINT);
+	removeKey(Key::WALK);
+
 	// Determine which speed to use based on moving type
-	float moveSpeed_ = 0.0f;
+	float moveSpeed_ = moveSpeed;
 	moveType_ = moveType;
 
-	if (isEqualFloat(moveSpeed, NPC_MOVE_SPEED_AUTO))
+	if (moveType_ == NPCMoveType_Drive)
 	{
-		if (moveType_ == NPCMoveType_Sprint)
+		applyKey(Key::SPRINT);
+
+		if (isEqualFloat(moveSpeed_, NPC_MOVE_SPEED_AUTO))
 		{
-			moveSpeed_ = NPC_MOVE_SPEED_SPRINT;
-		}
-		else if (moveType_ == NPCMoveType_Jog)
-		{
-			moveSpeed_ = NPC_MOVE_SPEED_JOG;
-		}
-		else
-		{
-			moveSpeed_ = NPC_MOVE_SPEED_WALK;
+			moveSpeed_ = 1.0f;
 		}
 	}
 	else
 	{
-		DynamicArray<float> speedValues = { NPC_MOVE_SPEED_WALK, NPC_MOVE_SPEED_JOG, NPC_MOVE_SPEED_SPRINT };
-		float nearestSpeed = getNearestFloatValue(moveSpeed_, speedValues);
+		upAndDown_ = static_cast<uint16_t>(Key::ANALOG_UP);
 
-		if (isEqualFloat(nearestSpeed, NPC_MOVE_SPEED_SPRINT))
-		{
-			moveType_ = NPCMoveType_Sprint;
-		}
-		else if (isEqualFloat(nearestSpeed, NPC_MOVE_SPEED_JOG))
+		if (moveType_ == NPCMoveType_Auto && isEqualFloat(moveSpeed_, NPC_MOVE_SPEED_AUTO))
 		{
 			moveType_ = NPCMoveType_Jog;
 		}
-		else if (isEqualFloat(nearestSpeed, NPC_MOVE_SPEED_WALK))
+
+		if (isEqualFloat(moveSpeed, NPC_MOVE_SPEED_AUTO))
 		{
-			moveType_ = NPCMoveType_Walk;
+			if (moveType_ == NPCMoveType_Sprint)
+			{
+				moveSpeed_ = NPC_MOVE_SPEED_SPRINT;
+			}
+			else if (moveType_ == NPCMoveType_Jog)
+			{
+				moveSpeed_ = NPC_MOVE_SPEED_JOG;
+			}
+			else
+			{
+				moveSpeed_ = NPC_MOVE_SPEED_WALK;
+			}
+		}
+		else if (moveType_ == NPCMoveType_Auto)
+		{
+			DynamicArray<float> speedValues = { NPC_MOVE_SPEED_WALK, NPC_MOVE_SPEED_JOG, NPC_MOVE_SPEED_SPRINT };
+			float nearestSpeed = getNearestFloatValue(moveSpeed_, speedValues);
+
+			if (isEqualFloat(nearestSpeed, NPC_MOVE_SPEED_SPRINT))
+			{
+				moveType_ = NPCMoveType_Sprint;
+			}
+			else if (isEqualFloat(nearestSpeed, NPC_MOVE_SPEED_JOG))
+			{
+				moveType_ = NPCMoveType_Jog;
+			}
+			else if (isEqualFloat(nearestSpeed, NPC_MOVE_SPEED_WALK))
+			{
+				moveType_ = NPCMoveType_Walk;
+			}
+		}
+
+		if (moveType_ == NPCMoveType_Sprint)
+		{
+			applyKey(Key::SPRINT);
+		}
+		else if (moveType_ == NPCMoveType_Walk)
+		{
+			applyKey(Key::WALK);
 		}
 	}
-
-	if (moveType == NPCMoveType_Sprint)
-	{
-		applyKey(Key::SPRINT);
-	}
-	else if (moveType == NPCMoveType_Walk)
-	{
-		applyKey(Key::WALK);
-	}
-
-	upAndDown_ = static_cast<uint16_t>(Key::ANALOG_UP);
 
 	// Calculate front vector and player's facing angle:
 	Vector3 front;
@@ -232,19 +272,10 @@ bool NPC::move(Vector3 pos, NPCMoveType moveType, float moveSpeed)
 
 	auto rotation = getRotation().ToEuler();
 	rotation.z = getAngleOfLine(front.x, front.y);
-	footSync_.Rotation = rotation; // Do this directly, if you use NPC::setRotation it's going to cause recursion
+	rotation_ = GTAQuat(rotation); // Do this directly, if you use NPC::setRotation it's going to cause recursion
 
 	// Calculate velocity to use on tick
 	velocity_ = front * (moveSpeed_ / 100.0f);
-
-	if (!(std::fabs(glm::length(velocity_)) < DBL_EPSILON))
-	{
-		estimatedArrivalTimeMS_ = duration_cast<Milliseconds>(Time::now().time_since_epoch()).count() + (static_cast<long long>(distance / glm::length(velocity_)) * (/* (npcComponent_->getFootSyncRate() * 10000) +*/ 1000));
-	}
-	else
-	{
-		estimatedArrivalTimeMS_ = 0;
-	}
 
 	// Set internal variables
 	targetPosition_ = pos;
@@ -261,7 +292,6 @@ void NPC::stopMove()
 	targetPosition_ = { 0.0f, 0.0f, 0.0f };
 	velocity_ = { 0.0f, 0.0f, 0.0f };
 	moveType_ = NPCMoveType_None;
-	estimatedArrivalTimeMS_ = 0;
 
 	upAndDown_ &= ~Key::UP;
 	removeKey(Key::SPRINT);
@@ -322,7 +352,6 @@ void NPC::setVelocity(Vector3 velocity, bool update)
 	if (moving_ && !update)
 	{
 		velocity_ = velocity;
-		footSync_.Velocity = velocity;
 	}
 
 	needsVelocityUpdate_ = update;
@@ -332,34 +361,34 @@ void NPC::setHealth(float health)
 {
 	if (health < 0.0f)
 	{
-		footSync_.HealthArmour.x = 0.0f;
+		health_ = 0.0f;
 	}
 	else
 	{
-		footSync_.HealthArmour.x = health;
+		health_ = health;
 	}
 }
 
 float NPC::getHealth() const
 {
-	return footSync_.HealthArmour.x;
+	return health_;
 }
 
 void NPC::setArmour(float armour)
 {
 	if (armour < 0.0f)
 	{
-		footSync_.HealthArmour.y = 0.0f;
+		armour_ = 0.0f;
 	}
 	else
 	{
-		footSync_.HealthArmour.y = armour;
+		armour_ = armour;
 	}
 }
 
 float NPC::getArmour() const
 {
-	return footSync_.HealthArmour.y;
+	return armour_;
 }
 
 bool NPC::isDead() const
@@ -1076,7 +1105,7 @@ void NPC::enterVehicle(IVehicle& vehicle, uint8_t seatId, NPCMoveType moveType)
 			}
 		}
 
-		// Call the SAMP enter vehicle function
+		// Emulate enter vehicle rpc
 		NetworkBitStream bs;
 		bs.writeUINT16(vehicle.getID());
 		bs.writeUINT8(vehicleSeatToEnter_);
@@ -1107,6 +1136,50 @@ void NPC::exitVehicle()
 	npcComponent_->emulateRPCIn(*player_, NetCode::RPC::OnPlayerExitVehicle::PacketID, bs);
 
 	vehicleEnterExitUpdateTime_ = lastUpdate_;
+}
+
+bool NPC::putInVehicle(IVehicle& vehicle, uint8_t seat)
+{
+	if (player_->getState() != PlayerState_OnFoot)
+	{
+		spawn();
+	}
+
+	auto maxPassengerSeats = getVehiclePassengerSeats(vehicle.getModel());
+	if (seat > maxPassengerSeats || maxPassengerSeats == 0xFF)
+	{
+		return false;
+	}
+
+	setPosition(vehicle.getPosition(), true);
+	vehicle.putPlayer(*player_, seat);
+	
+	auto angle = vehicle.getRotation().ToEuler().z;
+	auto rotation = getRotation().ToEuler();
+	rotation.z = angle;
+	setRotation(rotation, true);
+
+	return true;
+}
+
+bool NPC::removeFromVehicle()
+{
+	// Validate the player vehicle
+	if (!vehicle_)
+	{
+		return false;
+	}
+
+	auto vehicleData = queryExtension<IPlayerVehicleData>(player_);
+	if (vehicleData)
+	{
+		// Set his position
+		setPosition(getVehicleSeatPos(*vehicle_, vehicleData->getSeat()), true);
+		vehicleData->resetVehicle(); // Using this internal function to reset player's vehicle data
+		return true;
+	}
+
+	return false;
 }
 
 void NPC::setWeaponState(PlayerWeaponState state)
@@ -1407,7 +1480,7 @@ void NPC::updateAimData(const Vector3& point, bool setAngle)
 		}
 
 		rotation.z = facingAngle;
-		setRotation(rotation);
+		setRotation(rotation, false);
 	}
 
 	// Set the aim sync data
@@ -1422,44 +1495,67 @@ void NPC::updateAimData(const Vector3& point, bool setAngle)
 
 void NPC::sendFootSync()
 {
-	// Only send foot sync if player is spawned
-	if (!(player_->getState() == PlayerState_OnFoot || player_->getState() == PlayerState_Driver || player_->getState() == PlayerState_Passenger || player_->getState() == PlayerState_Spawned))
+	// Only send foot sync if player is spawned and on foot
+	auto state = player_->getState();
+	if (state != PlayerState_OnFoot && state != PlayerState_Spawned)
 	{
 		return;
 	}
 
-	NetworkBitStream bs;
+	uint16_t upAndDown, leftAndRight, keys;
+	getKeys(upAndDown, leftAndRight, keys);
 
-	auto& quat = footSync_.Rotation.q;
-	uint16_t upAndDown;
-	uint16_t leftAndDown;
-	uint16_t keys;
+	bool needsImmediateUpdate = footSync_.LeftRight != leftAndRight || footSync_.UpDown != upAndDown || footSync_.Keys != keys || footSync_.Position != position_ || footSync_.Rotation.q != rotation_.q || footSync_.HealthArmour.x != health_ || footSync_.HealthArmour.y != armour_ || footSync_.Weapon != weapon_ || footSync_.Velocity != velocity_;
 
-	getKeys(upAndDown, leftAndDown, keys);
+	auto generateFootSyncBitStream = [&](NetworkBitStream& bs)
+	{
+		footSync_.LeftRight = leftAndRight;
+		footSync_.UpDown = upAndDown;
+		footSync_.Keys = keys;
+		footSync_.Position = position_;
+		footSync_.Rotation = rotation_;
+		footSync_.HealthArmour.x = health_;
+		footSync_.HealthArmour.y = armour_;
+		footSync_.Weapon = weapon_;
+		footSync_.Velocity = velocity_;
 
-	footSync_.Position = position_;
-	footSync_.LeftRight = leftAndDown;
-	footSync_.UpDown = upAndDown;
-	footSync_.Keys = keys;
-	footSync_.Weapon = weapon_;
+		bs.writeUINT8(footSync_.PacketID);
+		bs.writeUINT16(footSync_.LeftRight);
+		bs.writeUINT16(footSync_.UpDown);
+		bs.writeUINT16(footSync_.Keys);
+		bs.writeVEC3(footSync_.Position);
+		bs.writeVEC4(Vector4(footSync_.Rotation.q.w, footSync_.Rotation.q.x, footSync_.Rotation.q.y, footSync_.Rotation.q.z));
+		bs.writeUINT8(uint8_t(footSync_.HealthArmour.x));
+		bs.writeUINT8(uint8_t(footSync_.HealthArmour.y));
+		bs.writeUINT8(footSync_.WeaponAdditionalKey);
+		bs.writeUINT8(footSync_.SpecialAction);
+		bs.writeVEC3(footSync_.Velocity);
+		bs.writeVEC3(footSync_.SurfingData.offset);
+		bs.writeUINT16(footSync_.SurfingData.ID);
+		bs.writeUINT16(footSync_.AnimationID);
+		bs.writeUINT16(footSync_.AnimationFlags);
+	};
 
-	bs.writeUINT8(footSync_.PacketID);
-	bs.writeUINT16(footSync_.LeftRight);
-	bs.writeUINT16(footSync_.UpDown);
-	bs.writeUINT16(footSync_.Keys);
-	bs.writeVEC3(footSync_.Position);
-	bs.writeVEC4(Vector4(quat.w, quat.x, quat.y, quat.z));
-	bs.writeUINT8(uint8_t(footSync_.HealthArmour.x));
-	bs.writeUINT8(uint8_t(footSync_.HealthArmour.y));
-	bs.writeUINT8(footSync_.WeaponAdditionalKey);
-	bs.writeUINT8(footSync_.SpecialAction);
-	bs.writeVEC3(footSync_.Velocity);
-	bs.writeVEC3(footSync_.SurfingData.offset);
-	bs.writeUINT16(footSync_.SurfingData.ID);
-	bs.writeUINT16(footSync_.AnimationID);
-	bs.writeUINT16(footSync_.AnimationFlags);
-
-	npcComponent_->emulatePacketIn(*player_, footSync_.PacketID, bs);
+	if (needsImmediateUpdate)
+	{
+		NetworkBitStream bs;
+		generateFootSyncBitStream(bs);
+		npcComponent_->emulatePacketIn(*player_, footSync_.PacketID, bs);
+	}
+	else
+	{
+		if (footSyncSkipUpdate_ < 10)
+		{
+			footSyncSkipUpdate_++;
+		}
+		else
+		{
+			NetworkBitStream bs;
+			generateFootSyncBitStream(bs);
+			npcComponent_->emulatePacketIn(*player_, footSync_.PacketID, bs);
+			footSyncSkipUpdate_ = 0;
+		}
+	}
 }
 
 void NPC::sendAimSync()
@@ -1470,41 +1566,74 @@ void NPC::sendAimSync()
 		return;
 	}
 
-	NetworkBitStream bs;
+	bool needsImmediateUpdate = prevAimSync_.CamMode != aimSync_.CamMode || prevAimSync_.CamFrontVector != aimSync_.CamFrontVector || prevAimSync_.CamPos != aimSync_.CamPos || prevAimSync_.AimZ != aimSync_.AimZ || prevAimSync_.ZoomWepState != aimSync_.ZoomWepState || prevAimSync_.AspectRatio != aimSync_.AspectRatio;
 
-	bs.writeUINT8(aimSync_.PacketID);
-	bs.writeUINT8(aimSync_.CamMode);
-	bs.writeVEC3(aimSync_.CamFrontVector);
-	bs.writeVEC3(aimSync_.CamPos);
-	bs.writeFLOAT(aimSync_.AimZ);
-	bs.writeUINT8(aimSync_.ZoomWepState);
-	bs.writeUINT8(aimSync_.AspectRatio);
+	auto generateAimSyncBitStream = [&](NetworkBitStream& bs)
+	{
+		bs.writeUINT8(aimSync_.PacketID);
+		bs.writeUINT8(aimSync_.CamMode);
+		bs.writeVEC3(aimSync_.CamFrontVector);
+		bs.writeVEC3(aimSync_.CamPos);
+		bs.writeFLOAT(aimSync_.AimZ);
+		bs.writeUINT8(aimSync_.ZoomWepState);
+		bs.writeUINT8(aimSync_.AspectRatio);
+	};
 
-	npcComponent_->emulatePacketIn(*player_, aimSync_.PacketID, bs);
+	if (needsImmediateUpdate)
+	{
+		NetworkBitStream bs;
+		generateAimSyncBitStream(bs);
+		npcComponent_->emulatePacketIn(*player_, aimSync_.PacketID, bs);
+		prevAimSync_ = aimSync_;
+	}
+	else
+	{
+		if (aimSyncSkipUpdate_ < 10)
+		{
+			aimSyncSkipUpdate_++;
+		}
+		else
+		{
+			NetworkBitStream bs;
+			generateAimSyncBitStream(bs);
+			npcComponent_->emulatePacketIn(*player_, aimSync_.PacketID, bs);
+			aimSyncSkipUpdate_ = 0;
+		}
+	}
 }
 
 void NPC::advance(TimePoint now)
 {
 	auto position = getPosition();
+	auto deltaTimeMS = static_cast<float>(duration_cast<Milliseconds>(now - lastMove_).count());
+	auto deltaTimeSEC = deltaTimeMS / 1000.0f;
 
-	if (estimatedArrivalTimeMS_ <= duration_cast<Milliseconds>(now.time_since_epoch()).count() || glm::distance(position, targetPosition_) <= 0.1f)
+	if (deltaTimeSEC <= 0.0f)
 	{
-		auto pos = targetPosition_;
+		return;
+	}
+
+	auto toTarget = targetPosition_ - position;
+	auto distanceToTarget = glm::length(toTarget);
+	auto maxTravel = glm::length(velocity_) * deltaTimeMS;
+
+	if (distanceToTarget <= 0.001f || maxTravel >= distanceToTarget)
+	{
+		// Reached or about to overshoot target
+		auto targetPos = targetPosition_; // just copy this to use in setPosition, since stopMove resets it
 		stopMove();
-		setPosition(pos);
+		setPosition(targetPos, false);
 		npcComponent_->getEventDispatcher_internal().dispatch(&NPCEventHandler::onNPCFinishMove, *this);
 	}
 	else
 	{
-		Milliseconds difference = duration_cast<Milliseconds>(now - lastMove_);
-		Vector3 travelled = velocity_ * static_cast<float>(difference.count());
-
-		position += travelled;
-		footSync_.Velocity = velocity_;
-		position_ = position; // Do this directly, if you use NPC::setPosition it's going to cause recursion
+		// Normalize direction and move by velocity * delta
+		auto direction = glm::normalize(toTarget);
+		auto travelled = direction * glm::length(velocity_) * deltaTimeMS;
+		position_ = position + travelled;
 	}
 
-	lastMove_ = Time::now();
+	lastMove_ = now;
 }
 
 void NPC::tick(Microseconds elapsed, TimePoint now)
@@ -1517,23 +1646,33 @@ void NPC::tick(Microseconds elapsed, TimePoint now)
 		if (duration_cast<Milliseconds>(now - lastUpdate_).count() > npcComponent_->getGeneralNPCUpdateRate())
 		{
 			// Only process the NPC if it is spawned
-			if (player_->getState() == PlayerState_OnFoot || player_->getState() == PlayerState_Driver || player_->getState() == PlayerState_Passenger || player_->getState() == PlayerState_Spawned)
+			if (state == PlayerState_OnFoot || state == PlayerState_Driver || state == PlayerState_Passenger || state == PlayerState_Spawned)
 			{
 				if (getHealth() <= 0.0f && state != PlayerState_Wasted && state != PlayerState_Spawned)
 				{
-					// check on vehicle
-					if (state == PlayerState_Driver || state == PlayerState_Passenger)
+					if (killPlayerFromVehicleNextTick_)
 					{
-						// TODO: Handle NPC driver/passenger death
+						kill(lastDamager_, lastDamagerWeapon_);
+						killPlayerFromVehicleNextTick_ = false;
 					}
-
-					// Kill the player
-					kill(lastDamager_, lastDamagerWeapon_);
+					else
+					{
+						// Check if player is in vehicle, if so, kill them next tick.
+						if (state == PlayerState_Driver || state == PlayerState_Passenger)
+						{
+							removeFromVehicle();
+							killPlayerFromVehicleNextTick_ = true;
+						}
+						else
+						{
+							kill(lastDamager_, lastDamagerWeapon_);
+						}
+					}
 				}
 
 				if (needsVelocityUpdate_)
 				{
-					setPosition(getPosition() + velocity_);
+					setPosition(getPosition() + velocity_, false);
 					setVelocity({ 0.0f, 0.0f, 0.0f }, false);
 				}
 
