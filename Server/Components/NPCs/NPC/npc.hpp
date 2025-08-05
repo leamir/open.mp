@@ -21,11 +21,11 @@ public:
 
 	Vector3 getPosition() const override;
 
-	void setPosition(Vector3 position) override;
+	void setPosition(const Vector3& position, bool immediateUpdate) override;
 
 	GTAQuat getRotation() const override;
 
-	void setRotation(GTAQuat rotation) override;
+	void setRotation(const GTAQuat& rotation, bool immediateUpdate) override;
 
 	int getVirtualWorld() const override;
 
@@ -127,6 +127,10 @@ public:
 
 	void exitVehicle() override;
 
+	bool putInVehicle(IVehicle& vehicle, uint8_t seat) override;
+
+	bool removeFromVehicle() override;
+
 	void setWeaponState(PlayerWeaponState state);
 
 	void updateWeaponState();
@@ -182,8 +186,15 @@ public:
 private:
 	// The NPC's player pointer.
 	IPlayer* player_;
+
+	// Update related variables
 	TimePoint lastUpdate_;
 	TimePoint lastFootSyncUpdate_;
+
+	// Update skipper counters
+	// base value is 0, and it is incremented to 10 and then we send the update
+	int footSyncSkipUpdate_;
+	int aimSyncSkipUpdate_;
 
 	// General data
 	int skin_;
@@ -192,6 +203,9 @@ private:
 	uint16_t upAndDown_;
 	uint16_t leftAndRight_;
 	Vector3 position_;
+	GTAQuat rotation_;
+	float health_;
+	float armour_;
 
 	// Attack data
 	bool meleeAttacking_;
@@ -201,7 +215,6 @@ private:
 	// Movements
 	NPCMoveType moveType_;
 	TimePoint lastMove_;
-	long long estimatedArrivalTimeMS_;
 	TimePoint moveStart_;
 	float moveSpeed_;
 	Vector3 targetPosition_;
@@ -240,17 +253,20 @@ private:
 	uint8_t lastDamagerWeapon_;
 
 	// Vehicle data
+	IVehicle* vehicle_;
 	IVehicle* vehicleToEnter_;
 	int vehicleSeatToEnter_;
 	bool enteringVehicle_;
 	bool jackingVehicle_;
 	TimePoint vehicleEnterExitUpdateTime_;
+	bool killPlayerFromVehicleNextTick_;
 
 	// Packets
 	NetCode::Packet::PlayerFootSync footSync_;
 	NetCode::Packet::PlayerVehicleSync driverSync_;
 	NetCode::Packet::PlayerPassengerSync passengerSync_;
 	NetCode::Packet::PlayerAimSync aimSync_;
+	NetCode::Packet::PlayerAimSync prevAimSync_; // keeping record of previous packet data so we compare and see if it needs an update
 
 	NPCComponent* npcComponent_;
 };
